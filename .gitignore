@@ -1,0 +1,17 @@
+# Personal files: never commit these
+.env
+settings.yaml
+google/
+briefs/
+.briefing/
+models.yaml
+!briefing/models.yaml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+dist/
+build/
+*.egg-info/

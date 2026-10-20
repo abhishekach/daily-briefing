@@ -1,0 +1,29 @@
+# Daily Briefing asks for a ROLE, never a model. Pick a profile with BRIEFING_MODELS=<name> (default: balanced), or
+# copy this file to models.yaml in your workspace and edit it. Any model LiteLLM supports works
+# (https://docs.litellm.ai/docs/providers); API keys come from the usual environment variables.
+#
+# Roles
+#   search   finds the news: one web search per topic. Needs a model with web search (Gemini, Claude, ...).
+#   mail     sorts your email. LOCAL ONLY: the code refuses a cloud model here unless settings.yaml says
+#            allow_cloud_for_email: true, and the mail role never has a backup.
+#
+# Local models: Ollama (https://ollama.com, `ollama pull qwen3:8b`) or LM Studio (Developer tab -> Start server).
+# A 7-14B model is enough for sorting email; about 2-6 seconds per email on a recent laptop.
+
+profiles:
+  # The author's daily setup: web search with Google grounding, email on the laptop.
+  # Measured: about $0.03-0.05 per news topic, so $0.12-0.18 for a brief with 4 topics.
+  balanced:
+    search: {model: gemini/gemini-3.8-flash, reasoning_effort: low, backup: anthropic/claude-haiku-5-5}
+    mail:   {model: ollama_chat/qwen3:8b, api_base: "http://localhost:11434"}
+
+  # One key (Anthropic) for the news; email still local. Measured: about $0.05 per topic (Claude's web search
+  # reads many result pages).
+  anthropic:
+    search: {model: anthropic/claude-haiku-5-5}
+    mail:   {model: ollama_chat/qwen3:8b, api_base: "http://localhost:11434"}
+
+  # LM Studio instead of Ollama for email. Set the model id exactly as LM Studio shows it.
+  lmstudio:
+    search: {model: gemini/gemini-3.8-flash, reasoning_effort: low, backup: anthropic/claude-haiku-5-5}
+    mail:   {model: "lm_studio/qwen3-8b", api_base: "http://localhost:1234/v1"}

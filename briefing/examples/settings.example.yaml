@@ -1,0 +1,57 @@
+# Your daily briefing. Everything personal lives here (and in .env), never in the code.
+# This example belongs to a made-up person: replace it with your own.
+
+name: Sam                       # used in the greeting
+timezone: Europe/Berlin         # your time zone (IANA name)
+
+# One paragraph about you. Your local model uses it to judge which emails matter; the search model uses it to pick news.
+about_me: >
+  Product manager at a mid-sized logistics software company in Hamburg, looking for a senior role in climate tech.
+  Renting a flat; two children at primary school. Cares about EU climate policy, AI tools for product teams and
+  remote-friendly jobs.
+
+# Organisations whose emails always count (employers you applied to, your bank, landlord, school, authorities).
+# Their emails are never treated as bulk mail.
+watch:
+  - Northwind Climate
+  - Example Bank
+  - Grundschule Musterstraße
+  - Finanzamt
+
+calendar_days: 2                # today and tomorrow
+
+mail:
+  hours: 24                     # the longest look-back; normally only mail since the previous brief is read
+  cap_per_account: 120
+  allow_cloud_for_email: false  # keep false: your email is read only by the local model on this computer
+  # Any other mailbox, read-only over IMAP. Use an app password and put it in .env under the name you give here.
+  imap: []
+  # imap:
+  #   - name: work
+  #     host: outlook.office365.com
+  #     user: sam@example.com
+  #     password_env: WORK_MAIL_PASSWORD
+  #     folders: [INBOX]
+  #     webmail: https://outlook.office.com/mail/
+
+news:
+  per_topic: 3
+  max_items: 10
+  days: 3                       # only items from the last N days
+  topics:
+    climate_policy:
+      label: EU climate policy
+      brief: New EU and German climate rules, carbon pricing and reporting duties that affect logistics companies.
+    ai_tools:
+      label: AI for product teams
+      brief: Important new AI tools and practices for product managers; launches and studies, not opinion pieces.
+    jobs:
+      label: Remote jobs
+      days: 7
+      context: medium           # rarer items: search wider
+      brief: Newly posted remote or Hamburg-based senior product manager roles in climate tech, each job's own posting page.
+
+delivery:                       # each needs its keys in .env; the brief is always saved as a web page too
+  telegram: true
+  ntfy: true
+  whatsapp: false
