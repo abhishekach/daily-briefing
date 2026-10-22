@@ -34,6 +34,26 @@ def norm(u: str) -> str:
     return re.sub(r"[#?].*$", "", u).rstrip("/")
 
 
+TRACKING = {"gclid", "fbclid", "mc_cid", "mc_eid", "ref", "ref_src", "igshid", "si"}
+
+
+def canon(u: str | None) -> str:
+    """The page a link points to: scheme, host case, a leading www., a trailing slash, #fragment and tracking
+    parameters are ignored; other query parameters (often the page id) and the path's letter case are kept."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit
+    u = (u or "").strip()
+    if not u:
+        return ""
+    try:
+        p = urlsplit(u if "://" in u else "https://" + u)
+    except ValueError:
+        return ""
+    host = (p.hostname or "").lower().removeprefix("www.")
+    q = sorted((k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
+               if not k.lower().startswith("utm_") and k.lower() not in TRACKING)
+    return f"{host}{p.path.rstrip('/')}" + (("?" + urlencode(q)) if q else "") if host else ""
+
+
 def search(topic: str, brief: str, about: str, n: int, days: int, seen: set[str], log=print) -> list[dict]:
     meta: dict = {}
     since = (date.today() - timedelta(days=days)).isoformat()
@@ -41,11 +61,11 @@ def search(topic: str, brief: str, about: str, n: int, days: int, seen: set[str]
               f"{date.today().isoformat()}).\n\nReturn at most {n} items, each a specific article, announcement or posting "
               "(never a home page).")
     res = llm.ask("search", prompt, system=SYSTEM, schema=Found, task="news", max_tokens=1800, web=True, meta=meta)
-    urls = {norm(u) for u in meta.get("search_urls", [])}
+    urls = {canon(u) for u in meta.get("search_urls", [])}
     out, dropped = [], []
     for it in res.items[:n]:
         nu = norm(it.url)
-        verified = nu in urls or any(s.startswith(nu) or nu.startswith(s) for s in urls if len(s) > 15)
+        verified = bool(canon(it.url)) and canon(it.url) in urls   # the same page only: no prefix or look-alike links
         why = ("not in the search results" if not verified else
                "a home page, not an article" if "/" not in nu or len(nu.split("/", 1)[1]) < 4 else
                "already shown" if nu in seen else

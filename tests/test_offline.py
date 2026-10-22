@@ -274,6 +274,45 @@ def test_schedule_prints_cron():
         assert "30 7 * * *" in out.getvalue() and "30 17 * * *" in out.getvalue()
 
 
+def test_exact_links_and_budget():
+    """A news link counts only if the same page was in the search results; the budget is checked before every
+    attempt; an unknown price is estimated, never logged as free; a busy ledger loses nothing."""
+    import sqlite3
+    seen = ["https://example.org/news/valid", "https://www.site.example/a/?utm_source=x", "https://q.example/p?id=7"]
+    urls = {N.canon(u) for u in seen}
+    assert N.canon("http://example.org/news/valid/") in urls and N.canon("https://site.example/a") in urls
+    assert N.canon("https://example.org/news/valid-fabricated") not in urls, "a look-alike link never passes"
+    assert N.canon("https://q.example/p?id=8") not in urls and N.canon("https://q.example/p?id=7#top") in urls
+
+    ws, s = workspace()
+    llm.S.roles["news"] = {"model": "openai/unknown-test-model"}
+    calls = []
+
+    def fake(role, messages, temperature, max_tokens, response_format=None, fallback=True, extra=None):
+        calls.append(1)
+        return resp("hello")
+    llm._complete = fake
+    llm.S.run_cost = 0.0
+    assert llm.ask("news", "x") == "hello"
+    with llm._db() as con:
+        c, k = con.execute("select cost_usd, cost_kind from calls order by rowid desc limit 1").fetchone()
+    assert c > 0 and k == "estimated", (c, k)
+    os.environ["BRIEFING_RUN_BUDGET_USD"] = str(llm.S.run_cost + 0.000001)
+    try:
+        llm.ask("news", "x")
+        raise AssertionError("run cap ignored")
+    except llm.BudgetExceeded as e:
+        assert "BRIEFING_RUN_BUDGET_USD" in str(e) and len(calls) == 1
+    os.environ["BRIEFING_RUN_BUDGET_USD"] = "1"
+    real = llm._db
+    llm._db = lambda: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked"))
+    llm._log("t", "news", "m", 1, 1, 0.5, 1, True)
+    llm._db = real
+    assert llm._pending().exists()
+    llm._log("t", "news", "m", 1, 1, 0.25, 1, True)
+    assert not llm._pending().exists()
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

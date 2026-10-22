@@ -129,7 +129,60 @@ def _db() -> sqlite3.Connection:
     con = sqlite3.connect(p, timeout=10)
     con.execute("create table if not exists calls(ts text, task text, role text, model text, in_tok integer, "
                 "out_tok integer, cost_usd real, ms integer, ok integer, note text)")
+    if "cost_kind" not in {r[1] for r in con.execute("pragma table_info(calls)")}:
+        try:     # exact = the provider's price list; estimated = a price we had to assume
+            con.execute("alter table calls add column cost_kind text")
+        except sqlite3.OperationalError:
+            pass
     return con
+
+
+def _pending() -> Path:
+    return S.workspace / ".briefing" / "ledger_pending.jsonl"
+
+
+# ---------------------------------------------------------------- budget
+# Before EVERY attempt (not once per answer), month-to-date spend + this attempt's worst case (prompt + max_tokens at
+# list price) must stay under BRIEFING_MONTHLY_BUDGET_USD, and this run's spend under BRIEFING_RUN_BUDGET_USD.
+# Providers can bill slightly differently (web search fees included), so the cap is firm but not exact to the cent.
+UNKNOWN_PRICE_PER_M = (float(os.environ.get("BRIEFING_UNKNOWN_PRICE_IN_PER_M", "5")),
+                       float(os.environ.get("BRIEFING_UNKNOWN_PRICE_OUT_PER_M", "25")))
+
+
+def _prices(model: str) -> tuple[float, float, bool]:
+    """(input $/token, output $/token, known). An unknown model gets a deliberately high price, never $0."""
+    try:
+        import litellm
+        table = getattr(litellm, "model_cost", None) or {}
+    except Exception:  # noqa: BLE001
+        table = {}
+    for k in (model, str(model).split("/", 1)[-1]):
+        info = table.get(k)
+        if info and info.get("input_cost_per_token") is not None and info.get("output_cost_per_token") is not None:
+            return float(info["input_cost_per_token"]), float(info["output_cost_per_token"]), True
+    return UNKNOWN_PRICE_PER_M[0] / 1e6, UNKNOWN_PRICE_PER_M[1] / 1e6, False
+
+
+def estimate_cost(model: str, in_tok: int, out_tok: int) -> float:
+    p_in, p_out, _ = _prices(model)
+    return in_tok * p_in + out_tok * p_out
+
+
+def _check_budget(role: str, messages: list, max_tokens: int, fallback: bool) -> None:
+    if is_local(role):
+        return
+    in_tok = sum(len(str(m.get("content") or "")) for m in messages) // 3 + 50
+    r = S.roles.get(role) or {}
+    models = [model_of(role)] + ([r["backup"]] if fallback and r.get("backup") else [])
+    est = max(estimate_cost(m, in_tok, max_tokens) for m in models)
+    month = float(os.environ.get("BRIEFING_MONTHLY_BUDGET_USD", "10"))
+    run = float(os.environ.get("BRIEFING_RUN_BUDGET_USD", "1"))
+    spent = month_spend()
+    if spent + est > month:
+        raise BudgetExceeded(f"This month's spend ${spent:.2f} plus this call's worst case ${est:.2f} would pass the "
+                             f"${month:.2f} cap (BRIEFING_MONTHLY_BUDGET_USD)")
+    if S.run_cost + est > run:
+        raise BudgetExceeded(f"This brief would pass its ${run:.2f} cap (BRIEFING_RUN_BUDGET_USD); stopped before the next call")
 
 
 def month_spend() -> float:
@@ -146,15 +199,25 @@ def month_summary() -> list[tuple]:
                            "group by task, role, model order by sum(cost_usd) desc", (start,)).fetchall()
 
 
-def _log(task, role, model, in_tok, out_tok, cost, ms, ok, note="") -> None:
+def _log(task, role, model, in_tok, out_tok, cost, ms, ok, note="", kind="exact") -> None:
     S.run_cost += cost
+    row = (datetime.now(timezone.utc).isoformat(timespec="seconds"), task, role, model, in_tok, out_tok, cost, ms,
+           int(ok), note[:500], kind)
+    sql = ("insert into calls(ts, task, role, model, in_tok, out_tok, cost_usd, ms, ok, note, cost_kind) "
+           "values (?,?,?,?,?,?,?,?,?,?,?)")
     try:
         with _db() as con:
-            con.execute("insert into calls values (?,?,?,?,?,?,?,?,?,?)",
-                        (datetime.now(timezone.utc).isoformat(timespec="seconds"), task, role, model,
-                         in_tok, out_tok, cost, ms, int(ok), note[:500]))
-    except sqlite3.OperationalError:
-        pass
+            con.execute(sql, row)
+            p = _pending()
+            if p.exists():              # calls that could not be written earlier
+                lines = p.read_text(encoding="utf-8").splitlines()
+                p.unlink()
+                for ln in lines:
+                    if ln.strip():
+                        con.execute(sql, tuple(json.loads(ln)))
+    except sqlite3.Error:   # never lose a paid call: it waits in a file and is written with the next one
+        with open(_pending(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
 
 
 # ---------------------------------------------------------------- web search sources
@@ -246,12 +309,17 @@ def _complete(role: str, messages: list, temperature: float, max_tokens: int, re
                                 **(extra or {}))
 
 
-def _cost(resp) -> float:
+def _cost(resp, model: str) -> tuple[float, str]:
+    """(cost, 'exact' | 'estimated'). An unknown price is estimated from the tokens, never logged as $0."""
+    u = resp.usage
     try:
         import litellm
-        return float(litellm.completion_cost(completion_response=resp) or 0)
+        c = float(litellm.completion_cost(completion_response=resp) or 0)
     except Exception:  # noqa: BLE001
-        return 0.0
+        c = None
+    if c is None or (c == 0 and (u.prompt_tokens or 0) + (u.completion_tokens or 0) > 0):
+        return estimate_cost(model, u.prompt_tokens or 0, u.completion_tokens or 0), "estimated"
+    return c, "exact"
 
 
 def _json_from(text: str) -> str:
@@ -319,19 +387,23 @@ def ask(role: str, prompt: str, *, system: str | None = None, schema: type[T] | 
                     {"role": "user", "content": prompt + ("\n\n/no_think" if local else "")}]
         mt = max_tokens
         for attempt in (1, 2):
+            _check_budget(role, messages, mt, fallback)      # before every attempt; raises BudgetExceeded
             t0 = time.time()
             try:
                 resp = _complete(role, messages, temperature, mt, schema if mode == "native" else None, fallback, extra)
             except Exception as e:  # noqa: BLE001
-                _log(task, role, model_of(role), 0, 0, 0.0, int((time.time() - t0) * 1000), False,
-                     f"{mode}: {type(e).__name__}: {e}")
+                el = time.time() - t0
+                # a call that failed after a long wait may still have billed its prompt: count it as an estimate
+                est = 0.0 if local or el < 20 else estimate_cost(model_of(role), sum(len(str(m["content"])) for m in messages) // 3, 0)
+                _log(task, role, model_of(role), 0, 0, est, int(el * 1000), False, f"{mode}: {type(e).__name__}: {e}",
+                     kind="estimated" if est else "exact")
                 if mode == "native" and type(e).__name__ == "BadRequestError":
                     S.native_refused.add((role, schema.__name__))
                 last = e
                 break
             ms = int((time.time() - t0) * 1000)
             used = getattr(resp, "model", None) or model_of(role)
-            cost = 0.0 if local else _cost(resp)
+            cost, kind = (0.0, "exact") if local else _cost(resp, used)
             u = resp.usage
             text = THINK_RE.sub("", resp.choices[0].message.content or "").strip()
             finish = getattr(resp.choices[0], "finish_reason", None)
@@ -341,16 +413,16 @@ def ask(role: str, prompt: str, *, system: str | None = None, schema: type[T] | 
                 if srcs:
                     meta.setdefault("sources", []).extend(srcs)
             if schema is None:
-                _log(task, role, used, u.prompt_tokens, u.completion_tokens, cost, ms, True)
+                _log(task, role, used, u.prompt_tokens, u.completion_tokens, cost, ms, True, kind=kind)
                 return text
             try:
                 obj = schema.model_validate_json(_json_from(text))
                 fix_urls(obj, grounding_sources(resp))
-                _log(task, role, used, u.prompt_tokens, u.completion_tokens, cost, ms, True, mode)
+                _log(task, role, used, u.prompt_tokens, u.completion_tokens, cost, ms, True, mode, kind=kind)
                 return obj
             except ValidationError as e:
                 _log(task, role, used, u.prompt_tokens, u.completion_tokens, cost, ms, False,
-                     f"{mode}: finish={finish} schema: {str(e)[:300]}")
+                     f"{mode}: finish={finish} schema: {str(e)[:300]}", kind=kind)
                 last = e
                 if finish == "length" or not text:
                     mt *= 2

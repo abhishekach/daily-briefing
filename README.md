@@ -111,7 +111,10 @@ Two roles, set in `models.yaml` (pick a profile with `BRIEFING_MODELS`):
 Email sorting is free. News costs about **$0.03–0.05 per topic** with Gemini (measured on the author's daily
 setup) and about $0.05 with Claude's web search; so roughly **$6–11 a month** for two briefs a day with 3–4 topics.
 Fewer topics, fewer editions or `--no-news` cost less. Every call is logged to `.briefing/ledger.sqlite`, and
-`BRIEFING_MONTHLY_BUDGET_USD` (default $10) stops paid calls once the month's spend reaches it.
+`BRIEFING_MONTHLY_BUDGET_USD` (default $10) and `BRIEFING_RUN_BUDGET_USD` (default $1 per brief) are checked before
+every model attempt against that attempt's worst case (prompt plus output limit at list price), so a retry can never
+slip past the cap. A model without a known price is logged at an estimated price (`cost_kind` `estimated`), never as
+free, and a call that cannot be written to a busy ledger waits in `.briefing/ledger_pending.jsonl`.
 
 A 7–14B local model sorts email well; expect a few seconds per email. With LM Studio, use the `lmstudio` profile;
 the briefing starts LM Studio's server itself if it is installed but not running.
